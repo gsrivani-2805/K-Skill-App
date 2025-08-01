@@ -28,9 +28,7 @@ class _SpeakingPracticeState extends State<SpeakingPractice>
   List<Map<String, String>> _conversationHistory = [];
 
   // Groq API configurationstatic
-  static const String _groqApiKey = ApiConfig.groqApiKey;
-  static const String _groqApiUrl =
-      'https://api.groq.com/openai/v1/chat/completions';
+  static final String _geminiApiKey = ApiConfig.geminiApiKey;
 
   @override
   void initState() {
@@ -168,72 +166,87 @@ class _SpeakingPracticeState extends State<SpeakingPractice>
   }
 
   // Generate LLM response with focus on error correction and follow-up
-  Future<String> _generateLLMResponse(String userInput) async {
-    try {
-      // Add user input to conversation history
-      _conversationHistory.add({'role': 'user', 'content': userInput});
+Future<String> _generateLLMResponse(String userInput) async {
+  try {
+    // Add user input to conversation history
+    _conversationHistory.add({'role': 'user', 'content': userInput});
+    
+    // Keep only last 6 messages to avoid token limits
+    if (_conversationHistory.length > 6) {
+      _conversationHistory = _conversationHistory.sublist(
+        _conversationHistory.length - 6,
+      );
+    }
 
-      // Keep only last 6 messages to avoid token limits
-      if (_conversationHistory.length > 6) {
-        _conversationHistory = _conversationHistory.sublist(
-          _conversationHistory.length - 6,
-        );
-      }
-
-      // Prepare the messages for Groq API with improved prompt
-      List<Map<String, String>> messages = [
-        {
-          'role': 'system',
-          'content': '''You are an English speaking tutor. Your job is to:
+    // Prepare the system instruction for Gemini
+    String systemInstruction = '''You are an English speaking tutor. Your job is to:
 1. Analyze the user's speech for grammar, vocabulary, and pronunciation errors
 2. If there are errors, gently correct them by providing the correct version
 3. Always ask a follow-up question to continue the conversation
 4. Keep responses under 40 words
 5. Be encouraging and supportive
 6. Focus on practical English improvement
-
 Format your response as:
 - First, acknowledge what they said
 - Then, if needed, provide gentle corrections like "You could also say: [correct version]"
-- Finally, ask an engaging follow-up question''',
-        },
-        ..._conversationHistory,
-      ];
+- Finally, ask an engaging follow-up question''';
 
-      final response = await http.post(
-        Uri.parse(_groqApiUrl),
-        headers: {
-          'Authorization': 'Bearer $_groqApiKey',
-          'Content-Type': 'application/json',
+    // Convert conversation history to Gemini format
+    List<Map<String, dynamic>> geminiContents = [];
+    
+    for (var message in _conversationHistory) {
+      String role = message['role'] == 'assistant' ? 'model' : 'user';
+      geminiContents.add({
+        'role': role,
+        'parts': [
+          {'text': message['content']}
+        ]
+      });
+    }
+
+    final response = await http.post(
+      Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_geminiApiKey'),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'system_instruction': {
+          'parts': [
+            {'text': systemInstruction}
+          ]
         },
-        body: jsonEncode({
-          'model': 'llama3-8b-8192',
-          'messages': messages,
-          'max_tokens': 100,
+        'contents': geminiContents,
+        'generationConfig': {
+          'maxOutputTokens': 100,
           'temperature': 0.8,
-        }),
-      );
+        },
+      }),
+    );
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        String llmResponse = data['choices'][0]['message']['content'].trim();
-
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      
+      if (data['candidates'] != null && data['candidates'].isNotEmpty) {
+        String llmResponse = data['candidates'][0]['content']['parts'][0]['text'].trim();
+        
         // Add LLM response to conversation history
         _conversationHistory.add({'role': 'assistant', 'content': llmResponse});
-
+        
         return llmResponse;
       } else {
-        print('Groq API Error: ${response.statusCode} - ${response.body}');
-        throw Exception(
-          'Failed to get response from Groq API: ${response.statusCode}',
-        );
+        throw Exception('No response generated from Gemini API');
       }
-    } catch (e) {
-      print('Error generating LLM response: $e');
-      return 'Sorry, I encountered an error. Could you please repeat that?';
+    } else {
+      print('Gemini API Error: ${response.statusCode} - ${response.body}');
+      throw Exception(
+        'Failed to get response from Gemini API: ${response.statusCode}',
+      );
     }
+  } catch (e) {
+    print('Error generating LLM response: $e');
+    return 'Sorry, I encountered an error. Could you please repeat that?';
   }
-
+}
   // Process user input and generate response
   void _processUserInput(String userInput) async {
     if (userInput.trim().isEmpty) return;
